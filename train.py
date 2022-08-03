@@ -1,4 +1,7 @@
+from pprint import pprint
+
 import numpy as np
+import timm as timm
 import torch
 import torchvision
 from torchvision import datasets, models, transforms
@@ -12,32 +15,40 @@ import time, os, copy, argparse
 import multiprocessing
 from torchsummary import summary
 from matplotlib import pyplot as plt
-
 # Construct argument parser
+from vits.ceit.ceit import CeiT
+from vits.pvt.pvt import PyramidVisionTransformerV2
+#from ood.RSC.resnet import resnet18, resnet50
+from torchvision.models import resnet50
+from EfficientFormer.models import efficientformer_l7, efficientformer_l1
+import timm
 ap = argparse.ArgumentParser()
 ap.add_argument("--mode", required=True, help="Training mode: finetue/transfer/scratch")
-args= vars(ap.parse_args())
+args = vars(ap.parse_args())
 
 # Set training mode
-train_mode=args["mode"]
+train_mode = args["mode"]
 
 # Set the train and validation directory paths
-train_directory = 'imds_small/train'
-valid_directory = 'imds_small/val'
-# Set the model save path
-PATH="model.pth" 
+train_directory = '/media/cvpr/CM_1/ECCV_2022/robin/train'
+valid_directory = '/media/cvpr/CM_1/ECCV_2022/ROBIN-cls-val/valid'
 
+'''
+tensorboard --logdir runs/Jun21_17-09-47_cvprlab/
+'''
+
+arch_name = 'RSCResNet'
 # Batch size
-bs = 64 
+bs = 64
 # Number of epochs
-num_epochs = 10
+num_epochs = 50
 # Number of classes
-num_classes = 11
+num_classes = 10
 # Number of workers
 num_cpu = multiprocessing.cpu_count()
 
 # Applying transforms to the data
-image_transforms = { 
+image_transforms = {
     'train': transforms.Compose([
         transforms.RandomResizedCrop(size=256, scale=(0.8, 1.0)),
         transforms.RandomRotation(degrees=15),
@@ -55,80 +66,77 @@ image_transforms = {
                              [0.229, 0.224, 0.225])
     ])
 }
- 
+
 # Load data from folders
 dataset = {
     'train': datasets.ImageFolder(root=train_directory, transform=image_transforms['train']),
     'valid': datasets.ImageFolder(root=valid_directory, transform=image_transforms['valid'])
 }
- 
+
 # Size of train and validation data
 dataset_sizes = {
-    'train':len(dataset['train']),
-    'valid':len(dataset['valid'])
+    'train': len(dataset['train']),
+    'valid': len(dataset['valid'])
 }
 
 # Create iterators for data loading
 dataloaders = {
-    'train':data.DataLoader(dataset['train'], batch_size=bs, shuffle=True,
-                            num_workers=num_cpu, pin_memory=True, drop_last=True),
-    'valid':data.DataLoader(dataset['valid'], batch_size=bs, shuffle=True,
-                            num_workers=num_cpu, pin_memory=True, drop_last=True)
+    'train': data.DataLoader(dataset['train'], batch_size=bs, shuffle=True,
+                             num_workers=num_cpu, pin_memory=True, drop_last=True),
+    'valid': data.DataLoader(dataset['valid'], batch_size=bs, shuffle=True,
+                             num_workers=num_cpu, pin_memory=True, drop_last=True)
 }
 
 # Class names or target labels
 class_names = dataset['train'].classes
 print("Classes:", class_names)
- 
+
 # Print the train and validation data sizes
-print("Training-set size:",dataset_sizes['train'],
+print("Training-set size:", dataset_sizes['train'],
       "\nValidation-set size:", dataset_sizes['valid'])
 
 # Set default device as gpu, if available
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-if train_mode=='finetune':
+if train_mode == 'finetune':
     # Load a pretrained model - Resnet18
-    print("\nLoading resnet18 for finetuning ...\n")
-    model_ft = models.resnet18(pretrained=True)
+    print("\nLoading efficientformer_l7 for finetuning ...\n")
+
+    #model_ft = timm.create_model('swinv2_cr_giant_224', num_classes=num_classes, pretrained=True, in_chans=3)
+
+    model_ft = efficientformer_l7(pretrained=True)
+
+    #model_ft = torch.load('/home/cvpr/Downloads/efficientformer_l7_300d.pth')
 
     # Modify fc layers to match num_classes
-    num_ftrs = model_ft.fc.in_features
-    model_ft.fc = nn.Linear(num_ftrs,num_classes )
+    #num_ftrs = model_ft.fc.in_features
+    #model_ft.fc = nn.Linear(num_ftrs, num_classes)
 
-elif train_mode=='scratch':
+elif train_mode == 'scratch':
     # Load a custom model - VGG11
-    print("\nLoading VGG11 for training from scratch ...\n")
-    model_ft = MyVGG11(in_ch=3,num_classes=11)
+    print(arch_name)
+    # model_ft = CeiT(image_size=224, patch_size=4, num_classes=num_classes, with_lca=True)
+
+    #model_ft = PyramidVisionTransformerV2(num_classes=num_classes, patch_size=16)
+
+    #model_ft = timm.create_model('mobilevit_xxs', num_classes=num_classes, pretrained=False, in_chans=3)
+    #model_ft = efficientformer_l1(pretrained=True)
+    print(timm.list_models)
+
+    #print("ResNet family in timm:", timm.list_models('*1k*', pretrained=True))
 
     # Set number of epochs to a higher value
-    num_epochs=100
-
-elif train_mode=='transfer':
-    # Load a pretrained model - MobilenetV2
-    print("\nLoading mobilenetv2 as feature extractor ...\n")
-    model_ft = models.mobilenet_v2(pretrained=True)    
-
-    # Freeze all the required layers (i.e except last conv block and fc layers)
-    for params in list(model_ft.parameters())[0:-5]:
-        params.requires_grad = False
-
-    # Modify fc layers to match num_classes
-    num_ftrs=model_ft.classifier[-1].in_features
-    model_ft.classifier=nn.Sequential(
-        nn.Dropout(p=0.2, inplace=False),
-        nn.Linear(in_features=num_ftrs, out_features=num_classes, bias=True)
-        )    
+    num_epochs = num_epochs
 
 # Transfer the model to GPU
 model_ft = model_ft.to(device)
 
-# Print model summary
-print('Model Summary:-\n')
-for num, (name, param) in enumerate(model_ft.named_parameters()):
-    print(num, name, param.requires_grad )
-summary(model_ft, input_size=(3, 224, 224))
-print(model_ft)
+# # Print model summary
+# print('Model Summary:-\n')
+# for num, (name, param) in enumerate(model_ft.named_parameters()):
+#     print(num, name, param.requires_grad)
+# summary(model_ft, input_size=(3, 224, 224))
+# print(model_ft)
 
 # Loss function
 criterion = nn.CrossEntropyLoss()
@@ -141,7 +149,9 @@ exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
 
 # Model training routine 
 print("\nTraining:-\n")
-def train_model(model, criterion, optimizer, scheduler, num_epochs=30):
+
+
+def train_model(model, criterion, optimizer, scheduler, num_epochs=num_epochs):
     since = time.time()
 
     best_model_wts = copy.deepcopy(model.state_dict())
@@ -149,7 +159,7 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=30):
 
     # Tensorboard summary
     writer = SummaryWriter()
-    
+
     for epoch in range(num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
         print('-' * 10)
@@ -159,7 +169,7 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=30):
             if phase == 'train':
                 model.train()  # Set model to training mode
             else:
-                model.eval()   # Set model to evaluate mode
+                model.eval()  # Set model to evaluate mode
 
             running_loss = 0.0
             running_corrects = 0
@@ -222,9 +232,13 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=30):
     model.load_state_dict(best_model_wts)
     return model
 
+
 # Train the model
-model_ft = train_model(model_ft, criterion, optimizer_ft, exp_lr_scheduler,
-                       num_epochs=num_epochs)
+model_ft = train_model(model_ft, criterion, optimizer_ft, exp_lr_scheduler, num_epochs=num_epochs)
+
+# Set the model save path
+PATH = "Semi_Supervised.pth"
+
 # Save the entire model
 print("\nSaving the model...")
 torch.save(model_ft, PATH)
